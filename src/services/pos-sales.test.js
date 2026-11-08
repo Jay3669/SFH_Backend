@@ -1,0 +1,94 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { calculatePosTotals } from "./pos-sales.js";
+
+const settings = {
+    packagingEnabled: false,
+    packagingAmount: 0,
+    taxEnabled: false,
+    taxRate: 0,
+    paymentMethods: { cash: true, card: true, upi: true, split: true },
+    allowBalanceDue: false,
+};
+
+test("calculates packaging, tax, split tender, and change", () => {
+    const totals = calculatePosTotals({
+        subtotal: 200,
+        discountAmount: 0,
+        orderType: "Takeaway",
+        packagingAmount: 20,
+        paymentMethod: "Split",
+        tenders: [{ method: "Cash", amount: 200 }, { method: "UPI", amount: 42 }],
+        settings: { ...settings, packagingEnabled: true, taxEnabled: true, taxRate: 10 },
+    });
+    assert.equal(totals.subtotal, 200);
+    assert.equal(totals.orderType, "Takeaway");
+    assert.equal(totals.packagingAmount, 20);
+    assert.equal(totals.taxAmount, 22);
+    assert.equal(totals.total, 242);
+    assert.equal(totals.amountPaid, 242);
+    assert.equal(totals.changeDue, 0);
+    assert.equal(totals.balanceDue, 0);
+});
+
+test("does not apply packaging to Dine-in orders and rejects unknown order types", () => {
+    const totals = calculatePosTotals({
+        subtotal: 200,
+        discountAmount: 0,
+        orderType: "Dine-in",
+        packagingAmount: 20,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 220 }],
+        settings: { ...settings, packagingEnabled: true, taxEnabled: true, taxRate: 10 },
+    });
+    assert.equal(totals.packagingAmount, 0);
+    assert.equal(totals.taxAmount, 20);
+    assert.equal(totals.total, 220);
+
+    assert.throws(() => calculatePosTotals({
+        subtotal: 100,
+        discountAmount: 0,
+        orderType: "Delivery",
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 100 }],
+        settings,
+    }), { status: 400 });
+});
+
+test("calculates cash change and partial balance", () => {
+    const change = calculatePosTotals({
+        subtotal: 400,
+        discountAmount: 0,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 500 }],
+        settings,
+    });
+    assert.equal(change.changeDue, 100);
+    assert.equal(change.amountPaid, 400);
+
+    const partial = calculatePosTotals({
+        subtotal: 400,
+        discountAmount: 0,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 50 }],
+        settings,
+    });
+    assert.equal(partial.balanceDue, 350);
+});
+
+test("rejects unavailable tender methods and discounts above subtotal", () => {
+    assert.throws(() => calculatePosTotals({
+        subtotal: 100,
+        discountAmount: 0,
+        paymentMethod: "Card",
+        tenders: [{ method: "Card", amount: 100 }],
+        settings: { ...settings, paymentMethods: { ...settings.paymentMethods, card: false } },
+    }), { status: 400 });
+    assert.throws(() => calculatePosTotals({
+        subtotal: 100,
+        discountAmount: 101,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 0 }],
+        settings,
+    }), { status: 400 });
+});

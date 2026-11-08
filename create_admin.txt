@@ -1,0 +1,6 @@
+Create the first Admin from PowerShell, using your configured database settings:
+
+$env:ADMIN_FIRST_NAME = "Admin"
+$env:ADMIN_EMAIL = "admin@example.com"
+$env:ADMIN_PASSWORD = "use-a-strong-password"
+npm run create-admin
