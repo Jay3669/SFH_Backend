@@ -2,6 +2,7 @@ import User from "../models/user.model.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { sequelize } from "../config/db.js";
+import { ACCESS_COOKIE_NAME, accessCookieOptions, clearAccessCookie } from "../utils/auth-cookie.js";
 
 const selfRegistrationRoles = new Set(["Employee", "Customer"]);
 
@@ -161,16 +162,21 @@ export const login = async (req, res, next) => {
             secret,
             { expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "8h" },
         );
+        res.cookie(ACCESS_COOKIE_NAME, accessToken, accessCookieOptions());
 
         return res.json({
             success: true,
             message: "Authentication successful. Welcome back!",
-            token: accessToken,
             data: authenticatedUser(user),
         });
     } catch (error) {
         return next(error);
     }
+};
+
+export const logout = (req, res) => {
+    clearAccessCookie(res);
+    return res.json({ success: true, message: "Signed out." });
 };
 
 export const forgotPassword = async (req, res, next) => {

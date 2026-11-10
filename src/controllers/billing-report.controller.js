@@ -4,6 +4,7 @@ import InventoryPurchase from "../models/inventory-purchase.model.js";
 import PosSale from "../models/pos-sale.model.js";
 import PosSaleItem from "../models/pos-sale-item.model.js";
 import PosSaleTender from "../models/pos-sale-tender.model.js";
+import VoidAudit from "../models/void-audit.model.js";
 import { getBillingPeriodRange, summarizeBillingReport } from "../services/billing-report.js";
 
 function serializePurchase(purchase) {
@@ -48,7 +49,7 @@ export const getBillingReport = async (req, res, next) => {
                 order: [["completed_at", "DESC"]],
             }),
         ]);
-        const [purchasePayments, saleItems] = await Promise.all([
+        const [purchasePayments, saleItems, voidAudits] = await Promise.all([
             purchases.length
                 ? InventoryPayment.findAll({
                     where: { purchase_id: { [Op.in]: purchases.map((purchase) => purchase.inventory_purchase_id) } },
@@ -57,8 +58,14 @@ export const getBillingReport = async (req, res, next) => {
                 : [],
             sales.length
                 ? PosSaleItem.findAll({
-                where: { sale_id: { [Op.in]: sales.map((sale) => sale.pos_sale_id) } },
-                order: [["pos_sale_item_id", "ASC"]],
+                    where: { sale_id: { [Op.in]: sales.map((sale) => sale.pos_sale_id) } },
+                    order: [["pos_sale_item_id", "ASC"]],
+                })
+                : [],
+            sales.length
+                ? VoidAudit.findAll({
+                    where: { sale_id: { [Op.in]: sales.map((sale) => sale.pos_sale_id) } },
+                    order: [["createdAt", "ASC"]],
                 })
                 : [],
         ]);
@@ -83,6 +90,14 @@ export const getBillingReport = async (req, res, next) => {
                 notes: item.notes || "",
             });
         }
+        const voidAuditsBySale = new Map(voidAudits.map((audit) => [String(audit.sale_id), {
+            reason: audit.reason,
+            previousStatus: audit.previous_status,
+            amount: Number(audit.amount),
+            requestedBy: String(audit.requested_by_id),
+            approvedBy: String(audit.approved_by_id),
+            voidedAt: audit.createdAt,
+        }]));
         const serializedSales = sales.map((sale) => ({
             id: String(sale.pos_sale_id),
             billNumber: sale.bill_number,
@@ -101,6 +116,7 @@ export const getBillingReport = async (req, res, next) => {
             changeDue: Number(sale.change_due),
             balanceDue: Number(sale.balance_due),
             tenders: [],
+            voidAudit: voidAuditsBySale.get(String(sale.pos_sale_id)) || null,
         }));
         const saleTenders = sales.length
             ? await PosSaleTender.findAll({

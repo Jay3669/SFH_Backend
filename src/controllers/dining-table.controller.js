@@ -197,6 +197,7 @@ export const updateDiningTableStatus = async (req, res, next) => {
             await record.update({ status: nextStatus }, { transaction });
             return serializeTable(record);
         });
+        emitKitchenEvent(nextStatus === "dirty/cleaning" ? "table:settled" : "table:status", { table });
         return res.json({ success: true, table });
     } catch (error) {
         return next(error);

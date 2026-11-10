@@ -43,7 +43,8 @@ const allowedOrigins = (process.env.CORS_ORIGINS || "")
     .filter(Boolean);
 
 app.use(cors({
-    ...(allowedOrigins.length ? { origin: allowedOrigins, credentials: true } : {}),
+    origin: allowedOrigins.length ? allowedOrigins : true,
+    credentials: true,
 }));
 app.use(requestLogger);
 app.use(express.json({

@@ -8,6 +8,10 @@ function roundCurrency(value) {
     return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
+function roundTaxToRupee(value) {
+    return Math.floor(Number(value) + 0.5);
+}
+
 function money(value, field) {
     const amount = Number(value);
     if (!Number.isFinite(amount) || amount < 0 || amount > 999999999999.99 || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
@@ -25,7 +29,7 @@ export function calculatePosTotals({ subtotal: subtotalValue, discountAmount: di
     const packagingAmount = settings.packagingEnabled && orderType === "Takeaway" ? requestedPackagingAmount : 0;
     const taxableAmount = Math.max(0, subtotal - discountAmount) + packagingAmount;
     const taxRate = settings.taxEnabled ? Number(settings.taxRate) : 0;
-    const taxAmount = settings.taxEnabled ? roundCurrency(taxableAmount * taxRate / 100) : 0;
+    const taxAmount = settings.taxEnabled ? roundTaxToRupee(taxableAmount * taxRate / 100) : 0;
     const total = roundCurrency(Math.max(0, subtotal - discountAmount + packagingAmount + taxAmount));
 
     if (![...paymentMethods, "Split"].includes(paymentMethod)) throw badRequest("paymentMethod must be Cash, Card, UPI, or Split.");

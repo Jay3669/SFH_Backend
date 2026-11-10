@@ -1,9 +1,10 @@
 import jwt from "jsonwebtoken";
 import User from "../models/user.model.js";
+import { clearAccessCookie, getAccessToken } from "../utils/auth-cookie.js";
 
 export const authenticate = async (req, res, next) => {
-    const authorization = req.headers.authorization;
-    if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) {
+    const token = getAccessToken(req);
+    if (!token) {
         return res.status(401).json({ success: false, message: "A bearer access token is required." });
     }
 
@@ -13,7 +14,7 @@ export const authenticate = async (req, res, next) => {
     }
 
     try {
-        const payload = jwt.verify(authorization.slice(7), secret);
+        const payload = jwt.verify(token, secret);
         if (typeof payload !== "object" || typeof payload.sub !== "string") {
             return res.status(401).json({ success: false, message: "Invalid access token." });
         }
@@ -30,6 +31,7 @@ export const authenticate = async (req, res, next) => {
         return next();
     } catch (error) {
         if (error instanceof jwt.JsonWebTokenError || error instanceof jwt.TokenExpiredError) {
+            clearAccessCookie(res);
             return res.status(401).json({ success: false, message: "Invalid or expired access token." });
         }
         return next(error);

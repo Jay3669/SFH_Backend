@@ -13,12 +13,23 @@ function kolkataDate(now) {
     return new Date(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day)));
 }
 
+function kolkataHour(now) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        hourCycle: "h23",
+    }).formatToParts(now);
+    return Number(parts.find(({ type }) => type === "hour")?.value);
+}
+
 export function getBillingPeriodRange(period, now = new Date()) {
     if (!["daily", "weekly", "monthly"].includes(period)) {
         throw Object.assign(new Error("period must be daily, weekly, or monthly."), { status: 400 });
     }
 
-    const start = kolkataDate(now);
+    const businessDate = kolkataDate(now);
+    if (kolkataHour(now) < 6) businessDate.setUTCDate(businessDate.getUTCDate() - 1);
+    const start = new Date(businessDate);
     if (period === "weekly") {
         const daysSinceMonday = (start.getUTCDay() + 6) % 7;
         start.setUTCDate(start.getUTCDate() - daysSinceMonday);
@@ -32,12 +43,14 @@ export function getBillingPeriodRange(period, now = new Date()) {
     if (period === "monthly") end.setUTCMonth(end.getUTCMonth() + 1);
 
     const indiaOffset = 330 * 60 * 1000;
+    const startAt = new Date(start.getTime() + 6 * 60 * 60 * 1000 - indiaOffset);
+    const endAt = new Date(end.getTime() + 2 * 60 * 60 * 1000 - indiaOffset);
     return {
         from: dateString(start),
         to: dateString(new Date(end.getTime() - 86400000)),
         endExclusive: dateString(end),
-        startAt: new Date(start.getTime() - indiaOffset).toISOString(),
-        endAt: new Date(end.getTime() - indiaOffset).toISOString(),
+        startAt: startAt.toISOString(),
+        endAt: endAt.toISOString(),
     };
 }
 
@@ -47,10 +60,11 @@ function roundCurrency(value) {
 
 export function summarizeBillingReport(purchases, sales) {
     const purchaseTotal = roundCurrency(purchases.reduce((sum, purchase) => sum + Number(purchase.total), 0));
-    const salesTotal = roundCurrency(sales.reduce((sum, sale) => sum + Number(sale.total), 0));
+    const activeSales = sales.filter((sale) => !/^(voided|void|cancelled)$/i.test(sale.status || ""));
+    const salesTotal = roundCurrency(activeSales.reduce((sum, sale) => sum + Number(sale.total), 0));
     return {
         purchases: { count: purchases.length, total: purchaseTotal, bills: purchases },
-        sales: { count: sales.length, total: salesTotal, bills: sales },
+        sales: { count: activeSales.length, total: salesTotal, bills: sales },
         grandTotal: roundCurrency(purchaseTotal + salesTotal),
     };
 }

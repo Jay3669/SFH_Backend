@@ -11,6 +11,7 @@ import User from "../models/user.model.js";
 import DiscountAuthorization from "../models/discount-authorization.model.js";
 import DiscountPinAttempt from "../models/discount-pin-attempt.model.js";
 import WhatsAppDelivery from "../models/whatsapp-delivery.model.js";
+import VoidAudit from "../models/void-audit.model.js";
 import { enqueuePosSaleInventoryDeduction } from "../services/inventory-consumption.js";
 import { DEFAULT_POS_SETTINGS, normalizePosSettings } from "../services/pos-settings.js";
 import { calculatePosTotals } from "../services/pos-sales.js";
@@ -63,11 +64,12 @@ async function loadSettings(transaction) {
 }
 
 async function serializeSale(sale, transaction) {
-    const [items, paymentRows, legacyTenders, whatsappDelivery] = await Promise.all([
+    const [items, paymentRows, legacyTenders, whatsappDelivery, voidAudit] = await Promise.all([
         PosSaleItem.findAll({ where: { sale_id: sale.pos_sale_id }, order: [["pos_sale_item_id", "ASC"]], transaction }),
         OrderPayment.findAll({ where: { order_id: sale.pos_sale_id }, order: [["order_payment_id", "ASC"]], transaction }),
         PosSaleTender.findAll({ where: { sale_id: sale.pos_sale_id }, order: [["pos_sale_tender_id", "ASC"]], transaction }),
         WhatsAppDelivery.findOne({ where: { sale_id: sale.pos_sale_id }, attributes: ["status", "error_message"], transaction }),
+        VoidAudit.findOne({ where: { sale_id: sale.pos_sale_id }, transaction }),
     ]);
     const tenders = paymentRows.length
         ? paymentRows.map((payment) => ({
@@ -111,6 +113,14 @@ async function serializeSale(sale, transaction) {
         whatsappDelivery: whatsappDelivery
             ? { status: whatsappDelivery.status, message: whatsappDelivery.error_message || "" }
             : sale.whatsapp_opt_in ? { status: sale.status === "Paid" ? "skipped" : "pending_payment" } : null,
+        voidAudit: voidAudit ? {
+            reason: voidAudit.reason,
+            previousStatus: voidAudit.previous_status,
+            amount: Number(voidAudit.amount),
+            requestedBy: String(voidAudit.requested_by_id),
+            approvedBy: String(voidAudit.approved_by_id),
+            voidedAt: voidAudit.createdAt,
+        } : null,
     };
 }
 
@@ -122,8 +132,8 @@ function normalizeLines(payload) {
     for (const line of payload.items) {
         const menuItemId = positiveId(line?.menuItemId, "menuItemId");
         const quantity = Number(line?.quantity);
-        if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 9999) {
-            throw httpError("Each item quantity must be a positive whole number.");
+        if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) {
+            throw httpError("Each item quantity must be a whole number between 1 and 99.");
         }
         const note = line?.notes ?? "";
         if (typeof note !== "string" || note.length > 300) {
@@ -132,7 +142,12 @@ function normalizeLines(payload) {
         const notes = note.trim();
         const key = `${menuItemId}\u0000${notes}`;
         const current = lines.get(key);
-        if (current) current.quantity += quantity;
+        if (current) {
+            current.quantity += quantity;
+            if (current.quantity > 99) {
+                throw httpError("Each item quantity must be a whole number between 1 and 99.");
+            }
+        }
         else lines.set(key, { menuItemId, quantity, notes });
     }
     return [...lines.values()];
@@ -141,9 +156,10 @@ function normalizeLines(payload) {
 function normalizeCustomerPhone(value) {
     if (value == null || value === "") return null;
     if (typeof value !== "string") throw httpError("Customer phone must be a string.");
-    const digits = value.replace(/[\s()+.-]/g, "");
-    if (!/^\d{10,15}$/.test(digits)) throw httpError("Enter a valid phone number with country code or a 10-digit Indian number.");
-    return digits.length === 10 ? `+91${digits}` : `+${digits}`;
+    const digits = value.replace(/\D/g, "");
+    const indianDigits = digits.startsWith("91") && digits.length === 12 ? digits.slice(2) : digits;
+    if (!/^[6-9]\d{9}$/.test(indianDigits)) throw httpError("Enter a valid 10-digit Indian mobile number.");
+    return `+91${indianDigits}`;
 }
 
 async function recordFailedPinAttempt(userId) {
@@ -390,6 +406,49 @@ export const resendWhatsAppBill = async (req, res, next) => {
         if (!sale.whatsapp_opt_in) throw httpError("The customer did not consent to WhatsApp bill delivery.", 409);
         const whatsappDelivery = await sendWhatsAppBill(sale, { retry: true });
         return res.json({ success: true, whatsappDelivery });
+    } catch (error) {
+        return next(error);
+    }
+};
+
+export const voidPosSale = async (req, res, next) => {
+    try {
+        const saleId = positiveId(req.params.saleId, "saleId");
+        const reason = requiredText(req.body?.reason, "reason", 500);
+        const pin = req.body?.pin;
+        if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
+            throw httpError("A supervisor's 4-digit PIN is required.");
+        }
+
+        const sale = await sequelize.transaction(async (transaction) => {
+            const record = await PosSale.findByPk(saleId, {
+                transaction,
+                lock: transaction.LOCK.UPDATE,
+            });
+            if (!record) throw httpError("Bill not found.", 404);
+            if (record.status === "Voided") throw httpError("This bill has already been voided.", 409);
+            if (req.user.role === "Employee" && String(record.created_by) !== String(req.user.id)) {
+                throw httpError("Bill not found.", 404);
+            }
+
+            const approver = await verifyDiscountPin(pin, req.user.id, transaction);
+            await VoidAudit.create({
+                sale_id: record.pos_sale_id,
+                requested_by_id: req.user.id,
+                approved_by_id: approver.id,
+                reason,
+                previous_status: record.status,
+                amount: record.total_amount,
+            }, { transaction });
+            await record.update({ status: "Voided" }, { transaction });
+            return record;
+        });
+
+        return res.json({
+            success: true,
+            message: "Bill voided and recorded in the audit trail.",
+            sale: await serializeSale(sale),
+        });
     } catch (error) {
         return next(error);
     }

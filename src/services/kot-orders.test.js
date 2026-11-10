@@ -17,6 +17,7 @@ test("normalizes KOT line identifiers, quantities, and notes", () => {
 test("rejects malformed KOT lines", () => {
     assert.throws(() => normalizeKotLines([{ menuItemId: "0", quantity: 1 }]), /positive integer/);
     assert.throws(() => normalizeKotLines([{ menuItemId: "1", quantity: 0 }]), /positive whole number/);
+    assert.throws(() => normalizeKotLines([{ menuItemId: "1", quantity: 100 }]), /between 1 and 99/);
     assert.throws(() => normalizeKotLines([]), /between 1 and 100/);
 });
 

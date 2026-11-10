@@ -14,8 +14,8 @@ export function normalizeKotLines(items) {
         if (!/^[1-9]\d*$/.test(menuItemId)) {
             throw Object.assign(new Error("Each menuItemId must be a positive integer."), { status: 400 });
         }
-        if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 9999) {
-            throw Object.assign(new Error("Each item quantity must be a positive whole number."), { status: 400 });
+        if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) {
+            throw Object.assign(new Error("Each item quantity must be a positive whole number between 1 and 99."), { status: 400 });
         }
         if (typeof notes !== "string" || notes.length > 300) {
             throw Object.assign(new Error("Item notes must be a string of at most 300 characters."), { status: 400 });

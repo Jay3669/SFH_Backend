@@ -31,6 +31,19 @@ test("calculates packaging, tax, split tender, and change", () => {
     assert.equal(totals.balanceDue, 0);
 });
 
+test("rounds GST half up once on the combined taxable subtotal to whole rupees", () => {
+    const totals = calculatePosTotals({
+        subtotal: 110.01,
+        discountAmount: 0,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 116.01 }],
+        settings: { ...settings, taxEnabled: true, taxRate: 5 },
+    });
+
+    assert.equal(totals.taxAmount, 6);
+    assert.equal(totals.total, 116.01);
+});
+
 test("keeps payment references and allows multiple payment rows with the same method", () => {
     const totals = calculatePosTotals({
         subtotal: 200,
