@@ -57,3 +57,27 @@ test("rejects invalid bill number prefixes and next numbers", () => {
         nextBillNumber: "1.5",
     }), { status: 400 });
 });
+
+test("normalizes date and time formats and defaults them for existing settings", () => {
+    const { dateFormat, timeFormat, ...legacySettings } = DEFAULT_POS_SETTINGS;
+    assert.deepEqual(normalizePosSettings(legacySettings), DEFAULT_POS_SETTINGS);
+    for (const dateFormat of ["YYYY-MM-DD", "DD-MM-YYYY", "MM-DD-YYYY", "DD MMM YYYY", "MMMM DD, YYYY"]) {
+        assert.equal(normalizePosSettings({ ...DEFAULT_POS_SETTINGS, dateFormat }).dateFormat, dateFormat);
+    }
+    assert.deepEqual(normalizePosSettings({ ...DEFAULT_POS_SETTINGS, dateFormat: "YYYY-MM-DD", timeFormat: "24-hour" }), {
+        ...DEFAULT_POS_SETTINGS,
+        dateFormat: "YYYY-MM-DD",
+        timeFormat: "24-hour",
+    });
+});
+
+test("rejects unsupported date and time formats", () => {
+    assert.throws(() => normalizePosSettings({
+        ...DEFAULT_POS_SETTINGS,
+        dateFormat: "DD-MON-YYYY",
+    }), { status: 400 });
+    assert.throws(() => normalizePosSettings({
+        ...DEFAULT_POS_SETTINGS,
+        timeFormat: "24",
+    }), { status: 400 });
+});

@@ -12,10 +12,30 @@ export const DEFAULT_POS_SETTINGS = {
         split: false,
     },
     allowBalanceDue: false,
+    dateFormat: "DD/MM/YYYY",
+    timeFormat: "12-hour",
 };
+
+const DATE_FORMATS = new Set([
+    "DD/MM/YYYY",
+    "MM/DD/YYYY",
+    "YYYY-MM-DD",
+    "DD-MM-YYYY",
+    "MM-DD-YYYY",
+    "DD MMM YYYY",
+    "MMMM DD, YYYY",
+]);
+const TIME_FORMATS = new Set(["12-hour", "24-hour"]);
 
 function badRequest(message) {
     return Object.assign(new Error(message), { status: 400 });
+}
+
+function formatValue(value, allowedValues, field) {
+    if (!allowedValues.has(value)) {
+        throw badRequest(`${field} must be one of: ${[...allowedValues].join(", ")}.`);
+    }
+    return value;
 }
 
 function booleanValue(value, field) {
@@ -72,6 +92,8 @@ export function normalizePosSettings(payload) {
             split: booleanValue(paymentMethods.split, "paymentMethods.split"),
         },
         allowBalanceDue: booleanValue(payload.allowBalanceDue, "allowBalanceDue"),
+        dateFormat: formatValue(payload.dateFormat ?? DEFAULT_POS_SETTINGS.dateFormat, DATE_FORMATS, "dateFormat"),
+        timeFormat: formatValue(payload.timeFormat ?? DEFAULT_POS_SETTINGS.timeFormat, TIME_FORMATS, "timeFormat"),
     };
     if (!settings.paymentMethods.cash && !settings.paymentMethods.card && !settings.paymentMethods.upi) {
         throw badRequest("Enable at least one payment method: cash, card, or UPI.");
