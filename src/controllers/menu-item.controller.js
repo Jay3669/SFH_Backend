@@ -1,6 +1,7 @@
 import { Op } from "sequelize";
 import MenuCategory from "../models/menu-category.model.js";
 import MenuItem from "../models/menu-item.model.js";
+import { emitKitchenEvent } from "../services/kitchen-socket.js";
 
 const itemFields = new Set([
     "category_id",
@@ -10,8 +11,10 @@ const itemFields = new Set([
     "is_available",
     "image_url",
     "food_type",
+    "kitchen_station",
 ]);
 const foodTypes = new Set(["Veg", "Non-Veg"]);
+const kitchenStations = new Set(["Tandoor", "Curry", "Starters", "Beverages"]);
 const priceSortOrders = new Map([
     ["price_asc", [["price", "ASC"], ["menu_item_id", "ASC"]]],
     ["price_desc", [["price", "DESC"], ["menu_item_id", "ASC"]]],
@@ -104,6 +107,13 @@ function validateItemField(field, value) {
             return { message: "image_url must be a valid HTTP(S) URL or null." };
         }
         return { value: value.trim() };
+    }
+
+    if (field === "kitchen_station") {
+        if (!kitchenStations.has(value)) {
+            return { message: `kitchen_station must be one of: ${[...kitchenStations].join(", ")}.` };
+        }
+        return { value };
     }
 
     if (!foodTypes.has(value)) {
@@ -263,6 +273,7 @@ export const updateMenuItem = async (req, res, next) => {
         await item.reload({
             include: [{ model: MenuCategory, as: "category", attributes: ["category_id", "category_name"] }],
         });
+        emitKitchenEvent("menu:item-updated", item);
         return res.json({ success: true, message: "Menu item updated successfully.", item });
     } catch (error) {
         return next(error);

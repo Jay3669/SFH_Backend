@@ -3,8 +3,8 @@ import { getPosSettings, updatePosSettings } from "../controllers/pos-settings.c
 import { authenticate, requireRoles } from "../middlewares/auth.middleware.js";
 
 const router = Router();
-router.use(authenticate, requireRoles("Admin", "Manager"));
+router.use(authenticate, requireRoles("Admin", "Manager", "Employee"));
 router.get("/", getPosSettings);
-router.put("/", updatePosSettings);
+router.put("/", requireRoles("Admin", "Manager"), updatePosSettings);
 
 export default router;

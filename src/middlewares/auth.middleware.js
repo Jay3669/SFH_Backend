@@ -19,7 +19,7 @@ export const authenticate = async (req, res, next) => {
         }
 
         const user = await User.findByPk(payload.sub, {
-            attributes: { exclude: ["password"] },
+            attributes: { exclude: ["password", "manager_pin_hash"] },
         });
         if (!user) return res.status(401).json({ success: false, message: "Invalid access token." });
         if (user.status !== "active") {

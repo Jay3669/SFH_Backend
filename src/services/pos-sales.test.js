@@ -31,6 +31,40 @@ test("calculates packaging, tax, split tender, and change", () => {
     assert.equal(totals.balanceDue, 0);
 });
 
+test("keeps payment references and allows multiple payment rows with the same method", () => {
+    const totals = calculatePosTotals({
+        subtotal: 200,
+        discountAmount: 0,
+        paymentMethod: "Split",
+        tenders: [
+            { method: "UPI", amount: 100, transactionRef: "upi-1" },
+            { method: "UPI", amount: 100, transactionRef: "upi-2" },
+        ],
+        settings,
+    });
+    assert.deepEqual(totals.tenders.map(({ method, amount, transactionRef }) => ({ method, amount, transactionRef })), [
+        { method: "UPI", amount: 100, transactionRef: "upi-1" },
+        { method: "UPI", amount: 100, transactionRef: "upi-2" },
+    ]);
+});
+
+test("rejects overlong or malformed transaction references", () => {
+    assert.throws(() => calculatePosTotals({
+        subtotal: 100,
+        discountAmount: 0,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 100, transactionRef: "x".repeat(121) }],
+        settings,
+    }), { status: 400 });
+    assert.throws(() => calculatePosTotals({
+        subtotal: 100,
+        discountAmount: 0,
+        paymentMethod: "Cash",
+        tenders: [{ method: "Cash", amount: 100, transactionRef: 42 }],
+        settings,
+    }), { status: 400 });
+});
+
 test("does not apply packaging to Dine-in orders and rejects unknown order types", () => {
     const totals = calculatePosTotals({
         subtotal: 200,

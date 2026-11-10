@@ -23,6 +23,8 @@ const PosSaleItem = sequelize.define("pos_sale_items", {
     quantity: { type: DataTypes.INTEGER, allowNull: false },
     unit_price: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     line_total: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
+    is_comp: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    notes: { type: DataTypes.STRING(300), allowNull: true },
 }, {
     schema,
     timestamps: true,

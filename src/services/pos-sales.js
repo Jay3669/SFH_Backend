@@ -33,13 +33,17 @@ export function calculatePosTotals({ subtotal: subtotalValue, discountAmount: di
     if (paymentMethod !== "Split" && !settings.paymentMethods[paymentMethod.toLowerCase()]) {
         throw badRequest(`${paymentMethod} payments are disabled in POS settings.`);
     }
-    if (!Array.isArray(payloadTenders)) throw badRequest("tenders must be an array.");
+    if (!Array.isArray(payloadTenders) || payloadTenders.length > 100) throw badRequest("tenders must be an array with no more than 100 lines.");
     const tenders = payloadTenders.map((row) => {
         const method = row?.method;
         if (!paymentMethods.has(method) || !settings.paymentMethods[method.toLowerCase()]) {
             throw badRequest("Every tender must use an enabled Cash, Card, or UPI method.");
         }
-        return { method, amount: money(row.amount, "tender amount") };
+        const transactionRef = row.transactionRef ?? row.transaction_ref ?? "";
+        if (typeof transactionRef !== "string" || transactionRef.trim().length > 120) {
+            throw badRequest("transactionRef must be at most 120 characters.");
+        }
+        return { method, amount: money(row.amount, "tender amount"), transactionRef: transactionRef.trim() || null };
     }).filter((row) => row.amount > 0);
     if (paymentMethod !== "Split" && (tenders.length > 1 || (tenders.length === 1 && tenders[0].method !== paymentMethod))) {
         throw badRequest("A non-split bill must have one tender matching its payment method.");

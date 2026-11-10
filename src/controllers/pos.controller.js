@@ -1,16 +1,28 @@
-import { Op } from "sequelize";
+import bcrypt from "bcrypt";
 import { sequelize } from "../config/db.js";
-import InventoryBatch from "../models/inventory-batch.model.js";
-import InventoryItem from "../models/inventory-item.model.js";
-import InventoryMovement from "../models/inventory-movement.model.js";
-import InventoryRecipe from "../models/inventory-recipe.model.js";
 import MenuItem from "../models/menu-item.model.js";
 import PosSale from "../models/pos-sale.model.js";
 import PosSaleItem from "../models/pos-sale-item.model.js";
 import PosSaleTender from "../models/pos-sale-tender.model.js";
+import OrderPayment from "../models/order-payment.model.js";
+import CashDrawer from "../models/cash-drawer.model.js";
 import PosSettings from "../models/pos-settings.model.js";
+import User from "../models/user.model.js";
+import DiscountAuthorization from "../models/discount-authorization.model.js";
+import DiscountPinAttempt from "../models/discount-pin-attempt.model.js";
+import WhatsAppDelivery from "../models/whatsapp-delivery.model.js";
+import { enqueuePosSaleInventoryDeduction } from "../services/inventory-consumption.js";
 import { DEFAULT_POS_SETTINGS, normalizePosSettings } from "../services/pos-settings.js";
 import { calculatePosTotals } from "../services/pos-sales.js";
+import {
+    discountApprovalRequired,
+    matchDiscountApprover,
+    nextPinAttemptState,
+    normalizeCompItemIds,
+    validateDiscountAuthorization,
+} from "../services/discount-authorizations.js";
+import { calculatePromotionDiscount } from "../services/happy-hour.js";
+import { sendWhatsAppBill } from "../services/whatsapp-bills.js";
 
 function httpError(message, status = 400) {
     return Object.assign(new Error(message), { status });
@@ -51,10 +63,19 @@ async function loadSettings(transaction) {
 }
 
 async function serializeSale(sale, transaction) {
-    const [items, tenders] = await Promise.all([
+    const [items, paymentRows, legacyTenders, whatsappDelivery] = await Promise.all([
         PosSaleItem.findAll({ where: { sale_id: sale.pos_sale_id }, order: [["pos_sale_item_id", "ASC"]], transaction }),
+        OrderPayment.findAll({ where: { order_id: sale.pos_sale_id }, order: [["order_payment_id", "ASC"]], transaction }),
         PosSaleTender.findAll({ where: { sale_id: sale.pos_sale_id }, order: [["pos_sale_tender_id", "ASC"]], transaction }),
+        WhatsAppDelivery.findOne({ where: { sale_id: sale.pos_sale_id }, attributes: ["status", "error_message"], transaction }),
     ]);
+    const tenders = paymentRows.length
+        ? paymentRows.map((payment) => ({
+            method: payment.payment_mode,
+            amount: Number(payment.amount),
+            transactionRef: payment.transaction_ref,
+        }))
+        : legacyTenders.map((tender) => ({ method: tender.method, amount: Number(tender.amount), transactionRef: null }));
     return {
         id: String(sale.pos_sale_id),
         number: sale.bill_number,
@@ -66,119 +87,147 @@ async function serializeSale(sale, transaction) {
             quantity: Number(item.quantity),
             price: Number(item.unit_price),
             lineTotal: Number(item.line_total),
+            comp: item.is_comp,
+            notes: item.notes || "",
         })),
         subtotal: Number(sale.subtotal),
         discount: Number(sale.discount_amount),
+        promotionalDiscount: Number(sale.promotional_discount_amount || 0),
         packaging: Number(sale.packaging_amount),
         tax: Number(sale.tax_amount),
         taxRate: Number(sale.tax_rate),
         total: Number(sale.total_amount),
         orderType: sale.order_type,
         paymentMethod: sale.payment_method,
-        tenders: tenders.map((tender) => ({ method: tender.method, amount: Number(tender.amount) })),
+        tenders,
         amountTendered: Number(sale.amount_tendered),
         amountPaid: Number(sale.amount_paid),
         changeDue: Number(sale.change_due),
         balanceDue: Number(sale.balance_due),
         stockDeducted: sale.stock_deducted,
+        stockDeductionStatus: sale.stock_deduction_status,
         stockWarnings: sale.stock_warnings || [],
         completedAt: sale.completed_at,
+        whatsappDelivery: whatsappDelivery
+            ? { status: whatsappDelivery.status, message: whatsappDelivery.error_message || "" }
+            : sale.whatsapp_opt_in ? { status: sale.status === "Paid" ? "skipped" : "pending_payment" } : null,
     };
-}
-
-async function deductRecipeStock(menuLines, sale, transaction) {
-    const recipeNames = [...new Set(menuLines.map((line) => line.menuItem.name))];
-    const recipes = await InventoryRecipe.findAll({ where: { dish_name: recipeNames }, transaction });
-    const recipesByDish = new Map();
-    for (const recipe of recipes) {
-        if (!recipesByDish.has(recipe.dish_name)) recipesByDish.set(recipe.dish_name, []);
-        recipesByDish.get(recipe.dish_name).push(recipe);
-    }
-
-    const requirements = new Map();
-    const stockWarnings = [];
-    for (const line of menuLines) {
-        const recipeRows = recipesByDish.get(line.menuItem.name) || [];
-        if (!recipeRows.length) {
-            stockWarnings.push(`${line.menuItem.name} has no recipe ingredients configured.`);
-            continue;
-        }
-        for (const recipe of recipeRows) {
-            const itemId = String(recipe.item_id);
-            requirements.set(itemId, (requirements.get(itemId) || 0) + Number(recipe.quantity_per_serving) * line.quantity);
-        }
-    }
-
-    const lockedItems = new Map();
-    for (const [itemId, quantity] of [...requirements].sort(([left], [right]) => Number(left) - Number(right))) {
-        const item = await InventoryItem.findByPk(itemId, { transaction, lock: transaction.LOCK.UPDATE });
-        if (!item || Number(item.quantity) + 0.000001 < quantity) {
-            throw httpError(`Not enough ${item?.name || "inventory"} for this bill. No sale or stock change was recorded.`);
-        }
-        const batches = await InventoryBatch.findAll({
-            where: { item_id: itemId, quantity: { [Op.gt]: 0 } },
-            order: [["received_at", "ASC"], ["expiry_date", "ASC"], ["inventory_batch_id", "ASC"]],
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-        });
-        const batchQuantity = batches.reduce((sum, batch) => sum + Number(batch.quantity), 0);
-        if (batchQuantity + 0.000001 < quantity) {
-            throw httpError(`Not enough batch stock for ${item.name}. No sale or stock change was recorded.`);
-        }
-        lockedItems.set(itemId, { item, quantity, batches });
-    }
-
-    for (const { item, quantity, batches } of lockedItems.values()) {
-        let remaining = quantity;
-        let totalCost = 0;
-        for (const batch of batches) {
-            if (remaining <= 0.000001) break;
-            const used = Math.min(Number(batch.quantity), remaining);
-            await batch.update({ quantity: Number(batch.quantity) - used }, { transaction });
-            totalCost += used * Number(batch.unit_cost);
-            remaining -= used;
-        }
-        const roundedCost = roundCurrency(totalCost);
-        await item.update({ quantity: Number(item.quantity) - quantity }, { transaction });
-        await InventoryMovement.create({
-            item_id: item.inventory_item_id,
-            movement_type: "POS consumption",
-            quantity,
-            unit_cost_snapshot: quantity ? roundedCost / quantity : 0,
-            total_cost_snapshot: roundedCost,
-            reason: `POS bill ${sale.bill_number}`,
-            batch_code: "FIFO allocation",
-        }, { transaction });
-    }
-    return { stockDeducted: requirements.size > 0, stockWarnings };
 }
 
 function normalizeLines(payload) {
     if (!Array.isArray(payload?.items) || !payload.items.length || payload.items.length > 100) {
         throw httpError("items must contain between 1 and 100 lines.");
     }
-    const quantities = new Map();
+    const lines = new Map();
     for (const line of payload.items) {
         const menuItemId = positiveId(line?.menuItemId, "menuItemId");
         const quantity = Number(line?.quantity);
         if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 9999) {
             throw httpError("Each item quantity must be a positive whole number.");
         }
-        quantities.set(menuItemId, (quantities.get(menuItemId) || 0) + quantity);
+        const note = line?.notes ?? "";
+        if (typeof note !== "string" || note.length > 300) {
+            throw httpError("Each item note must be a string of at most 300 characters.");
+        }
+        const notes = note.trim();
+        const key = `${menuItemId}\u0000${notes}`;
+        const current = lines.get(key);
+        if (current) current.quantity += quantity;
+        else lines.set(key, { menuItemId, quantity, notes });
     }
-    return [...quantities].map(([menuItemId, quantity]) => ({ menuItemId, quantity }));
+    return [...lines.values()];
+}
+
+function normalizeCustomerPhone(value) {
+    if (value == null || value === "") return null;
+    if (typeof value !== "string") throw httpError("Customer phone must be a string.");
+    const digits = value.replace(/[\s()+.-]/g, "");
+    if (!/^\d{10,15}$/.test(digits)) throw httpError("Enter a valid phone number with country code or a 10-digit Indian number.");
+    return digits.length === 10 ? `+91${digits}` : `+${digits}`;
+}
+
+async function recordFailedPinAttempt(userId) {
+    await sequelize.transaction(async (transaction) => {
+        const [attempt] = await DiscountPinAttempt.findOrCreate({
+            where: { user_id: userId },
+            defaults: { user_id: userId, failed_attempts: 0 },
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+        });
+        const state = nextPinAttemptState(attempt);
+        await attempt.update({
+            failed_attempts: state.failedAttempts,
+            window_started_at: state.windowStartedAt,
+            locked_until: state.lockedUntil,
+        }, { transaction });
+    });
+}
+
+async function verifyDiscountPin(pin, requesterId, transaction) {
+    const attempt = await DiscountPinAttempt.findByPk(requesterId);
+    if (attempt?.locked_until && new Date(attempt.locked_until).getTime() > Date.now()) {
+        throw httpError("Manager PIN verification is temporarily locked. Try again in 15 minutes.", 429);
+    }
+
+    const approvers = await User.findAll({
+        where: { role: ["Admin", "Manager"], status: "active" },
+        attributes: ["id", "role", "status", "manager_pin_hash"],
+    });
+    const matchedApprover = await matchDiscountApprover(pin, approvers);
+    if (!matchedApprover) {
+        await recordFailedPinAttempt(requesterId);
+        throw httpError("The manager PIN is invalid or has not been configured.", 403);
+    }
+    const approver = await User.findByPk(matchedApprover.id, {
+        attributes: ["id", "role", "status", "manager_pin_hash"],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+    });
+    if (
+        !approver
+        || !["Admin", "Manager"].includes(approver.role)
+        || approver.status !== "active"
+        || approver.manager_pin_hash !== matchedApprover.manager_pin_hash
+    ) {
+        throw httpError("Manager PIN verification failed. Please try again.", 403);
+    }
+    if (attempt) {
+        await attempt.update({ failed_attempts: 0, window_started_at: null, locked_until: null });
+    }
+    return approver;
 }
 
 export const createPosSale = async (req, res, next) => {
     try {
         const idempotencyKey = requiredText(req.get("Idempotency-Key") || req.body?.idempotencyKey, "Idempotency-Key");
         const existing = await PosSale.findOne({ where: { idempotency_key: idempotencyKey } });
-        if (existing) return res.json({ success: true, sale: await serializeSale(existing) });
+        if (existing) {
+            if (req.user.role === "Employee" && String(existing.created_by) !== String(req.user.id)) {
+                throw httpError("Bill not found.", 404);
+            }
+            return res.json({ success: true, sale: await serializeSale(existing) });
+        }
 
         const lines = normalizeLines(req.body);
         const discountRequest = money(req.body?.discountAmount ?? 0, "discountAmount");
+        const customerPhone = normalizeCustomerPhone(req.body?.customerPhone);
+        const whatsappOptIn = req.body?.whatsappOptIn === true;
+        if (req.body?.whatsappOptIn !== undefined && typeof req.body.whatsappOptIn !== "boolean") {
+            throw httpError("whatsappOptIn must be a boolean.");
+        }
+        if (whatsappOptIn && !customerPhone) throw httpError("A valid customer phone number is required to send a WhatsApp bill.");
+        const compItemIds = normalizeCompItemIds(
+            req.body?.compItemIds,
+            new Set(lines.map((line) => line.menuItemId)),
+        );
         const paymentMethod = requiredText(req.body?.paymentMethod, "paymentMethod", 16);
         const sale = await sequelize.transaction(async (transaction) => {
+            const drawer = await CashDrawer.findOne({
+                where: { cashier_id: req.user.id, status: "open" },
+                transaction,
+                lock: transaction.LOCK.UPDATE,
+            });
+            if (!drawer) throw httpError("Open a cash drawer before creating a POS sale.", 409);
             const settingsRow = await loadSettings(transaction);
             const settings = normalizePosSettings(settingsRow.settings);
             const billNumber = `${settings.billNumberPrefix}${settings.nextBillNumber}`;
@@ -195,9 +244,36 @@ export const createPosSale = async (req, res, next) => {
             const menuById = new Map(menuItems.map((item) => [String(item.menu_item_id), item]));
             const menuLines = lines.map((line) => ({ ...line, menuItem: menuById.get(line.menuItemId) }));
             const subtotal = roundCurrency(menuLines.reduce((sum, line) => sum + Number(line.menuItem.price) * line.quantity, 0));
+            const compAmount = roundCurrency(menuLines
+                .filter((line) => compItemIds.includes(line.menuItemId))
+                .reduce((sum, line) => sum + Number(line.menuItem.price) * line.quantity, 0));
+            const { discountAmount: promotionalDiscount } = await calculatePromotionDiscount(menuLines.map((line) => ({
+                ...line,
+                isComp: compItemIds.includes(line.menuItemId),
+            })));
+            if (req.body?.promotionalDiscountAmount !== undefined) {
+                const expectedPromotion = money(req.body.promotionalDiscountAmount, "promotionalDiscountAmount");
+                if (Math.abs(expectedPromotion - promotionalDiscount) > 0.01) {
+                    throw httpError("Scheduled discounts changed while this bill was open. Refresh the bill and confirm the updated total.", 409);
+                }
+            }
+            const totalDiscount = roundCurrency(discountRequest + compAmount + promotionalDiscount);
+            if (totalDiscount > subtotal) throw httpError("Total discounts and comps cannot exceed the subtotal.");
+            const needsApproval = discountApprovalRequired({
+                subtotal,
+                discountAmount: discountRequest + compAmount,
+                compItemIds,
+            });
+            const authorizationInput = validateDiscountAuthorization({
+                authorization: req.body?.discountAuthorization,
+                required: needsApproval,
+            });
+            const approver = authorizationInput
+                ? await verifyDiscountPin(authorizationInput.pin, req.user.id, transaction)
+                : null;
             const tenderSummary = calculatePosTotals({
                 subtotal,
-                discountAmount: discountRequest,
+                discountAmount: totalDiscount,
                 orderType: req.body?.orderType ?? req.body?.order_type ?? "Dine-in",
                 packagingAmount: req.body?.packagingAmount ?? req.body?.packaging_amount ?? 0,
                 paymentMethod,
@@ -210,8 +286,10 @@ export const createPosSale = async (req, res, next) => {
                 bill_number: billNumber,
                 idempotency_key: idempotencyKey,
                 status: tenderSummary.balanceDue > 0 ? "Partially paid" : "Paid",
+                stock_deduction_status: tenderSummary.balanceDue > 0 ? "awaiting_payment" : "pending",
                 subtotal: tenderSummary.subtotal,
                 discount_amount: tenderSummary.discountAmount,
+                promotional_discount_amount: promotionalDiscount,
                 packaging_amount: tenderSummary.packagingAmount,
                 tax_amount: tenderSummary.taxAmount,
                 tax_rate: tenderSummary.taxRate,
@@ -222,6 +300,8 @@ export const createPosSale = async (req, res, next) => {
                 change_due: tenderSummary.changeDue,
                 balance_due: tenderSummary.balanceDue,
                 payment_method: paymentMethod,
+                customer_phone: customerPhone,
+                whatsapp_opt_in: whatsappOptIn,
                 created_by: req.user?.id || null,
             }, { transaction });
             await PosSaleItem.bulkCreate(menuLines.map((line) => ({
@@ -231,18 +311,85 @@ export const createPosSale = async (req, res, next) => {
                 quantity: line.quantity,
                 unit_price: Number(line.menuItem.price),
                 line_total: roundCurrency(Number(line.menuItem.price) * line.quantity),
+                is_comp: compItemIds.includes(line.menuItemId),
+                notes: line.notes || null,
             })), { transaction });
+            if (approver) {
+                await DiscountAuthorization.create({
+                    order_id: createdSale.pos_sale_id,
+                    requested_by_id: req.user.id,
+                    approved_by_id: approver.id,
+                    reason_code: authorizationInput.reasonCode,
+                    authorization_type: compItemIds.length
+                        ? discountRequest > 0 ? "mixed" : "comp"
+                        : "discount",
+                    discount_amount: roundCurrency(discountRequest + compAmount),
+                    comp_item_ids: compItemIds,
+                }, { transaction });
+            }
             if (tenderSummary.tenders.length) {
+                await OrderPayment.bulkCreate(tenderSummary.tenders.map((tender) => ({
+                    order_id: createdSale.pos_sale_id,
+                    payment_mode: tender.method,
+                    transaction_ref: tender.transactionRef,
+                    amount: tender.amount,
+                })), { transaction });
                 await PosSaleTender.bulkCreate(tenderSummary.tenders.map((tender) => ({
                     sale_id: createdSale.pos_sale_id,
-                    ...tender,
+                    method: tender.method,
+                    amount: tender.amount,
                 })), { transaction });
             }
-            const stockResult = await deductRecipeStock(menuLines, createdSale, transaction);
-            await createdSale.update(stockResult, { transaction });
+            if (tenderSummary.balanceDue === 0) {
+                await enqueuePosSaleInventoryDeduction(menuLines, createdSale, transaction);
+            }
             return createdSale;
         });
-        return res.status(201).json({ success: true, sale: await serializeSale(sale) });
+        const whatsappDelivery = await sendWhatsAppBill(sale);
+        return res.status(201).json({
+            success: true,
+            sale: { ...await serializeSale(sale), whatsappDelivery },
+        });
+    } catch (error) {
+        return next(error);
+    }
+};
+
+export const setManagerPin = async (req, res, next) => {
+    try {
+        if (!["Admin", "Manager"].includes(req.user.role)) {
+            throw httpError("Only Admins and Managers can configure an approval PIN.", 403);
+        }
+        const { currentPassword, pin, confirmPin } = req.body ?? {};
+        if (typeof currentPassword !== "string" || !currentPassword) {
+            throw httpError("Current password is required.");
+        }
+        if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
+            throw httpError("Manager PIN must contain exactly four digits.");
+        }
+        if (confirmPin !== pin) throw httpError("PIN confirmation does not match.");
+        const user = await User.findByPk(req.user.id, { attributes: ["id", "password", "role"] });
+        if (!user || !["Admin", "Manager"].includes(user.role) || !(await bcrypt.compare(currentPassword, user.password))) {
+            throw httpError("Current password is incorrect.", 403);
+        }
+        await user.update({ manager_pin_hash: await bcrypt.hash(pin, 12) });
+        return res.json({ success: true, message: "Manager approval PIN saved." });
+    } catch (error) {
+        return next(error);
+    }
+};
+
+export const resendWhatsAppBill = async (req, res, next) => {
+    try {
+        const saleId = positiveId(req.params.saleId, "saleId");
+        const sale = await PosSale.findByPk(saleId);
+        if (!sale) throw httpError("Bill not found.", 404);
+        if (req.user.role === "Employee" && String(sale.created_by) !== String(req.user.id)) {
+            throw httpError("Bill not found.", 404);
+        }
+        if (!sale.whatsapp_opt_in) throw httpError("The customer did not consent to WhatsApp bill delivery.", 409);
+        const whatsappDelivery = await sendWhatsAppBill(sale, { retry: true });
+        return res.json({ success: true, whatsappDelivery });
     } catch (error) {
         return next(error);
     }
@@ -252,7 +399,11 @@ export const listRecentPosSales = async (req, res, next) => {
     try {
         const limit = Number(req.query.limit ?? 5);
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw httpError("limit must be between 1 and 50.");
-        const sales = await PosSale.findAll({ order: [["completed_at", "DESC"]], limit });
+        const sales = await PosSale.findAll({
+            where: req.user.role === "Employee" ? { created_by: req.user.id } : undefined,
+            order: [["completed_at", "DESC"]],
+            limit,
+        });
         const serialized = [];
         for (const sale of sales) serialized.push(await serializeSale(sale));
         return res.json({ success: true, sales: serialized });

@@ -45,6 +45,11 @@ const MenuItem = sequelize.define(
             type: DataTypes.ENUM("Veg", "Non-Veg"),
             allowNull: false,
         },
+        kitchen_station: {
+            type: DataTypes.STRING(32),
+            allowNull: false,
+            defaultValue: "Curry",
+        },
     },
     {
         schema,

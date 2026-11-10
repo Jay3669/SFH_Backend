@@ -34,6 +34,11 @@ const User = sequelize.define(
             allowNull: false,
         },
 
+        manager_pin_hash: {
+            type: DataTypes.STRING(100),
+            allowNull: true,
+        },
+
         phone_number: {
             type: DataTypes.STRING,
             allowNull: true,

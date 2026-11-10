@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { logger } from "../utils/logger.js";
 
+function safeRequestPath(path) {
+    return path.replace(/(\/(?:order|receipts)\/)[^/]+/g, "$1[redacted]");
+}
+
 export function requestLogger(req, res, next) {
     const requestId = randomUUID();
     const startedAt = process.hrtime.bigint();
@@ -12,7 +16,7 @@ export function requestLogger(req, res, next) {
         const details = {
             requestId,
             method: req.method,
-            path: req.path,
+            path: safeRequestPath(req.path),
             statusCode: res.statusCode,
             durationMs: Number(durationMs.toFixed(2)),
             ip: req.socket.remoteAddress,

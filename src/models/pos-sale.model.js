@@ -9,6 +9,7 @@ const PosSale = sequelize.define("pos_sales", {
     status: { type: DataTypes.STRING(24), allowNull: false },
     subtotal: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
     discount_amount: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
+    promotional_discount_amount: { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
     packaging_amount: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
     tax_amount: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
     tax_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false },
@@ -19,7 +20,10 @@ const PosSale = sequelize.define("pos_sales", {
     change_due: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
     balance_due: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
     payment_method: { type: DataTypes.STRING(16), allowNull: false },
+    customer_phone: { type: DataTypes.STRING(20), allowNull: true },
+    whatsapp_opt_in: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     stock_deducted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    stock_deduction_status: { type: DataTypes.STRING(24), allowNull: false, defaultValue: "pending" },
     stock_warnings: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
     completed_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
     created_by: {

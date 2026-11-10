@@ -46,6 +46,7 @@ function validateId(id) {
 function publicUser(user) {
     const data = user.toJSON();
     delete data.password;
+    delete data.manager_pin_hash;
     return data;
 }
 
@@ -67,7 +68,7 @@ export const getUsers = async (req, res, next) => {
         }
 
         const { count, rows } = await User.findAndCountAll({
-            attributes: { exclude: ["password"] },
+            attributes: { exclude: ["password", "manager_pin_hash"] },
             order: [["id", "ASC"]],
             limit,
             offset: (page - 1) * limit,
@@ -138,7 +139,7 @@ export const getUserById = async (req, res, next) => {
             return res.status(400).json({ message: "id must be a positive integer." });
         }
         const user = await User.findByPk(req.params.id, {
-            attributes: { exclude: ["password"] },
+            attributes: { exclude: ["password", "manager_pin_hash"] },
         });
         if (!user) return res.status(404).json({ message: "User not found." });
         return res.json({ user });

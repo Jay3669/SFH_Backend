@@ -80,6 +80,7 @@ export const getBillingReport = async (req, res, next) => {
                 name: item.item_name,
                 quantity: Number(item.quantity),
                 total: Number(item.line_total),
+                notes: item.notes || "",
             });
         }
         const serializedSales = sales.map((sale) => ({

@@ -14,6 +14,7 @@ function readBoolean(value, fieldName) {
 function publicUser(user) {
     const data = user.toJSON();
     delete data.password;
+    delete data.manager_pin_hash;
     return data;
 }
 
